@@ -25,7 +25,7 @@ pub fn decode(nonzero: &[u8], sign: &[u8], n: usize) -> Vec<i8> {
 }
 
 pub fn bit_len(n: usize) -> usize {
-    (n + 7) / 8
+    n.div_ceil(8)
 }
 
 #[cfg(test)]
@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn test_bitplane_size() {
-        let (nz, _) = encode(&vec![1i8; 9]);
+        let (nz, _) = encode(&[1i8; 9]);
         assert_eq!(nz.len(), 2);
     }
 }

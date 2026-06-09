@@ -13,13 +13,64 @@ impl Kernel for Neon {
     }
 
     fn gemm(&self, w: &TernaryTensor, x: &[f32], n: usize, y: &mut [f32]) {
+        // Tiled GEMM: vectorize over the N (output column) dimension instead of
+        // gathering one x column at a time. x is (K×N) row-major, so a whole
+        // weight column contributes ±x[col, :] (contiguous) to the output row.
         y.par_chunks_mut(n).enumerate().for_each(|(row, row_out)| {
+            neon_gemm_row(w, row, x, n, row_out);
             let scale = w.row_scale(row);
-            for j in 0..n {
-                let col_x: Vec<f32> = (0..w.cols).map(|c| x[c * n + j]).collect();
-                row_out[j] = neon_dot_row(w, row, &col_x) * scale;
+            for v in row_out.iter_mut() {
+                *v *= scale;
             }
         });
+    }
+}
+
+/// Accumulate one GEMM output row (length `n`) by streaming nonzero weight
+/// columns across the contiguous x rows, 4-wide NEON. `row_out` starts zeroed;
+/// scale is applied by the caller.
+#[cfg(target_arch = "aarch64")]
+fn neon_gemm_row(w: &TernaryTensor, row: usize, x: &[f32], n: usize, row_out: &mut [f32]) {
+    use std::arch::aarch64::*;
+    unsafe {
+        let chunks = n / 4;
+        for col in 0..w.cols {
+            let i  = row * w.cols + col;
+            let nz = (w.nonzero[i / 8] >> (i % 8)) & 1;
+            if nz == 0 { continue; }
+            let sg = (w.sign[i / 8] >> (i % 8)) & 1;
+            let xrow = &x[col * n..col * n + n];
+
+            if sg == 0 {
+                for c in 0..chunks {
+                    let off = c * 4;
+                    let a = vld1q_f32(row_out.as_ptr().add(off));
+                    let b = vld1q_f32(xrow.as_ptr().add(off));
+                    vst1q_f32(row_out.as_mut_ptr().add(off), vaddq_f32(a, b));
+                }
+                for j in (chunks * 4)..n { row_out[j] += xrow[j]; }
+            } else {
+                for c in 0..chunks {
+                    let off = c * 4;
+                    let a = vld1q_f32(row_out.as_ptr().add(off));
+                    let b = vld1q_f32(xrow.as_ptr().add(off));
+                    vst1q_f32(row_out.as_mut_ptr().add(off), vsubq_f32(a, b));
+                }
+                for j in (chunks * 4)..n { row_out[j] -= xrow[j]; }
+            }
+        }
+    }
+}
+
+/// Scalar fallback for the tiled GEMM row on non-aarch64 targets.
+#[cfg(not(target_arch = "aarch64"))]
+fn neon_gemm_row(w: &TernaryTensor, row: usize, x: &[f32], n: usize, row_out: &mut [f32]) {
+    for col in 0..w.cols {
+        match w.get(row, col) {
+            1  => for j in 0..n { row_out[j] += x[col * n + j]; },
+            -1 => for j in 0..n { row_out[j] -= x[col * n + j]; },
+            _  => {}
+        }
     }
 }
 

@@ -1,0 +1,7 @@
+# Runtime dependency (also declared in pyproject.toml [project.dependencies]).
+numpy>=1.24
+
+# Development / build toolchain.
+# Build the Rust extension:  maturin develop --features extension-module
+maturin>=1.7,<2.0
+pytest>=8.0

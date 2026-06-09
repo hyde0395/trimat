@@ -1,3 +1,8 @@
+// SIMD/bitplane kernels are inherently index-driven (a loop variable indexes
+// both the packed weight planes and the float operands), so range-based loops
+// are the natural idiom here rather than a lint to fix.
+#![allow(clippy::needless_range_loop)]
+
 use ndarray::{Array1, Array2};
 use numpy::{
     IntoPyArray, PyArray1, PyArray2,

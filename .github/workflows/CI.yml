@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Fast feedback: native Rust tests + clippy on each OS/arch the kernels target.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --verbose
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  # Cross-platform Python wheels via maturin. Covers the architectures named in
+  # the project overview: Apple Silicon, ARM Linux, and x86.
+  wheels:
+    name: wheels (${{ matrix.platform.runner }} / ${{ matrix.platform.target }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            target: x86_64
+          - runner: ubuntu-latest
+            target: aarch64
+          - runner: macos-14
+            target: aarch64
+          - runner: macos-13
+            target: x86_64
+          - runner: windows-latest
+            target: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist
+          manylinux: auto
+      - name: Install and smoke-test wheel
+        # Skip when the wheel cannot run natively on the runner (e.g. ARM Linux
+        # cross-build on an x86 host); native combinations exercise the import.
+        if: ${{ !(matrix.platform.runner == 'ubuntu-latest' && matrix.platform.target == 'aarch64') }}
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          # safetensors is light and has wheels everywhere, so the loader tests
+          # run here; torch is exercised in the dedicated python-tests job.
+          python -m pip install numpy pytest safetensors
+          python -m pip install --no-index --find-links dist trimat
+          python -c "import trimat; print(trimat.cpu_features())"
+          python -m pytest tests/ -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
+          path: dist
+
+  # Full Python suite including the optional integrations (loader + BitLinear)
+  # on a single platform with reliable CPU torch wheels, so those tests run in
+  # CI rather than being skipped.
+  python-tests:
+    name: python tests (loader + BitLinear)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install deps and build extension
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin numpy pytest safetensors
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          maturin develop --release --features extension-module
+      - name: pytest
+        run: python -m pytest tests/ -v

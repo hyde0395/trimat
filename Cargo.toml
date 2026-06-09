@@ -26,6 +26,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name    = "gemv_bench"
 harness = false
 
+[[bench]]
+name    = "gemm_bench"
+harness = false
+
 [profile.release]
 lto       = true
 opt-level = 3
