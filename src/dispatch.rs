@@ -1,8 +1,18 @@
+use std::sync::OnceLock;
+
 use crate::kernels::Kernel;
 
 pub struct DispatchInfo {
     pub backend: &'static str,
     pub threads: usize,
+}
+
+/// Process-wide cached kernel. Selection (including CPU feature detection) runs
+/// once on first use; every later call reuses the same trait object, avoiding a
+/// per-call allocation and re-detection on the hot path.
+pub fn kernel() -> &'static dyn Kernel {
+    static KERNEL: OnceLock<Box<dyn Kernel>> = OnceLock::new();
+    KERNEL.get_or_init(best_kernel).as_ref()
 }
 
 /// Returns the best available kernel for the current runtime.

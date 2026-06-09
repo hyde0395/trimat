@@ -50,10 +50,14 @@ fn gemv<'py>(
             "x length {} != tensor cols {}", xlen, w.cols
         )));
     }
-    let x_vec: Vec<f32> = x.as_slice()?.to_vec();
+    // Borrow x directly when contiguous; only copy on the rare strided path.
+    let x_owned;
+    let x_slice: &[f32] = match x.as_slice() {
+        Ok(s) => s,
+        Err(_) => { x_owned = x.as_array().to_vec(); &x_owned }
+    };
     let mut y = vec![0.0f32; w.rows];
-    let kernel = dispatch::best_kernel();
-    kernel.gemv(w, &x_vec, &mut y);
+    dispatch::kernel().gemv(w, x_slice, &mut y);
     Ok(Array1::from(y).into_pyarray(py))
 }
 
@@ -71,14 +75,17 @@ fn gemm<'py>(
         )));
     }
     let n = x_shape[1];
-    let x_vec: Vec<f32> = if x.is_c_contiguous() {
-        x.as_slice()?.to_vec()
+    // Borrow X directly when contiguous; only copy on the rare strided path.
+    // This avoids copying the full K×N activation matrix on every call.
+    let x_owned;
+    let x_slice: &[f32] = if x.is_c_contiguous() {
+        x.as_slice()?
     } else {
-        x.to_owned_array().into_raw_vec_and_offset().0
+        x_owned = x.to_owned_array().into_raw_vec_and_offset().0;
+        &x_owned
     };
     let mut y = vec![0.0f32; w.rows * n];
-    let kernel = dispatch::best_kernel();
-    kernel.gemm(w, &x_vec, n, &mut y);
+    dispatch::kernel().gemm(w, x_slice, n, &mut y);
     let arr = Array2::from_shape_vec((w.rows, n), y)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(arr.into_pyarray(py))

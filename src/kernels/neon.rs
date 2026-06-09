@@ -81,55 +81,54 @@ fn neon_dot_row(w: &TernaryTensor, row: usize, x: &[f32]) -> f32 {
     use std::arch::aarch64::*;
     unsafe {
         let cols = w.cols;
+        let nz = &w.nonzero;
+        let sg = &w.sign;
+        let nlen = nz.len();
         let mut acc = vdupq_n_f32(0.0);
 
-        // Process 4 elements at a time with NEON.
+        // Lane k tests bit k of a nibble; used to expand 4 packed bits into 4
+        // all-ones / all-zero lane masks entirely in registers (no stack
+        // round-trip, no per-element branch).
+        let sel = vld1q_u32([1u32, 2, 4, 8].as_ptr());
+
         let chunks = cols / 4;
         for chunk in 0..chunks {
-            let base = row * cols + chunk * 4;
+            let base = row * cols + chunk * 4; // global bit index of these 4 weights
+            let byte = base >> 3;
+            let off  = base & 7;
 
-            // Load x[col..col+4].
+            // Read the (up to 2) bytes covering this nibble and shift it down.
+            let hi = if byte + 1 < nlen { 1usize } else { 0usize };
+            let nz_bits = ((nz[byte] as u16) | ((nz[byte + hi] as u16) << 8)) >> off;
+            let sg_bits = ((sg[byte] as u16) | ((sg[byte + hi] as u16) << 8)) >> off;
+            let nz4 = (nz_bits & 0xF) as u32;
+            let sg4 = (sg_bits & 0xF) as u32;
+
             let xv = vld1q_f32(x.as_ptr().add(chunk * 4));
+            let xu = vreinterpretq_u32_f32(xv);
 
-            // Build ternary mask: +1 → keep, -1 → negate, 0 → zero.
-            // nz bits select non-zero elements; sg bits select sign.
-            let mut pos = [0u32; 4];
-            let mut neg = [0u32; 4];
-            for k in 0..4 {
-                let i = base + k;
-                let nz = (w.nonzero[i / 8] >> (i % 8)) & 1;
-                let sg = (w.sign[i / 8]    >> (i % 8)) & 1;
-                if nz == 1 {
-                    if sg == 0 { pos[k] = 0xFFFF_FFFF; }
-                    else        { neg[k] = 0xFFFF_FFFF; }
-                }
-            }
+            // vtstq: lane = all-ones where the corresponding bit is set.
+            let nz_mask = vtstq_u32(vdupq_n_u32(nz4), sel); // weight != 0
+            let sg_mask = vtstq_u32(vdupq_n_u32(sg4), sel); // weight  < 0
+            let pos_mask = vbicq_u32(nz_mask, sg_mask);     // nz & !sg  -> +1
+            let neg_mask = vandq_u32(nz_mask, sg_mask);     // nz &  sg  -> -1
 
-            let pos_mask = vld1q_u32(pos.as_ptr());
-            let neg_mask = vld1q_u32(neg.as_ptr());
-
-            // pos_contrib = x where pos, else 0
-            let pos_vals = vreinterpretq_f32_u32(vandq_u32(
-                vreinterpretq_u32_f32(xv), pos_mask));
-            // neg_contrib = -x where neg, else 0
-            let neg_vals = vreinterpretq_f32_u32(vandq_u32(
-                vreinterpretq_u32_f32(xv), neg_mask));
-            let neg_vals = vnegq_f32(neg_vals);
-
-            acc = vaddq_f32(acc, vaddq_f32(pos_vals, neg_vals));
+            let pos_vals = vreinterpretq_f32_u32(vandq_u32(xu, pos_mask));
+            let neg_vals = vreinterpretq_f32_u32(vandq_u32(xu, neg_mask));
+            // +x on positive lanes, -x on negative lanes, 0 elsewhere.
+            acc = vaddq_f32(acc, vsubq_f32(pos_vals, neg_vals));
         }
 
-        // Sum the 4 NEON lanes.
         let mut result = vaddvq_f32(acc);
 
         // Handle remaining columns (tail) with scalar.
         for col in (chunks * 4)..cols {
             let i = row * cols + col;
-            let nz = (w.nonzero[i / 8] >> (i % 8)) & 1;
-            let sg = (w.sign[i / 8]    >> (i % 8)) & 1;
-            if nz == 1 {
-                if sg == 0 { result += x[col]; }
-                else        { result -= x[col]; }
+            let nzb = (nz[i / 8] >> (i % 8)) & 1;
+            let sgb = (sg[i / 8] >> (i % 8)) & 1;
+            if nzb == 1 {
+                if sgb == 0 { result += x[col]; }
+                else         { result -= x[col]; }
             }
         }
         result
@@ -176,6 +175,29 @@ mod tests {
         for i in 0..8 {
             assert!((y_scalar[i] - y_neon[i]).abs() < 1e-3,
                 "row {}: scalar={} neon={}", i, y_scalar[i], y_neon[i]);
+        }
+    }
+
+    #[test]
+    fn test_neon_matches_scalar_gemv_unaligned_cols() {
+        // cols not a multiple of 8 exercises the straddling two-byte nibble read
+        // and the scalar tail in the vectorized decode.
+        for &cols in &[13usize, 19, 23, 31] {
+            let rows = 7;
+            let data: Vec<f32> =
+                (0..rows * cols).map(|i| ((i * 5) % 3) as f32 - 1.0).collect();
+            let w = make_tensor(&data, rows, cols);
+            let x: Vec<f32> = (0..cols).map(|i| (i as f32).cos()).collect();
+
+            let mut y_scalar = vec![0.0f32; rows];
+            let mut y_neon = vec![0.0f32; rows];
+            Scalar.gemv(&w, &x, &mut y_scalar);
+            Neon.gemv(&w, &x, &mut y_neon);
+
+            for i in 0..rows {
+                assert!((y_scalar[i] - y_neon[i]).abs() < 1e-3,
+                    "cols={} row {}: scalar={} neon={}", cols, i, y_scalar[i], y_neon[i]);
+            }
         }
     }
 
