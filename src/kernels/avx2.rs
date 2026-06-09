@@ -27,6 +27,27 @@ impl Kernel for Avx2 {
             }
         });
     }
+
+    fn qgemv(&self, w: &TernaryTensor, x_q: &[i8], x_scale: f32, y: &mut [f32]) {
+        y.par_iter_mut().enumerate().for_each(|(row, out)| {
+            // Safety: Avx2 is only constructed when dispatch detects AVX2 at runtime.
+            *out = unsafe { avx2_qdot_row(w, row, x_q) } as f32 * w.row_scale(row) * x_scale;
+        });
+    }
+
+    fn qgemm(
+        &self, w: &TernaryTensor, x_q: &[i8], x_scale: &[f32], n: usize, y: &mut [f32],
+    ) {
+        y.par_chunks_mut(n).enumerate().for_each(|(row, row_out)| {
+            let mut acc = vec![0i32; n];
+            // Safety: Avx2 is only constructed when dispatch detects AVX2 at runtime.
+            unsafe { avx2_qgemm_accumulate(w, row, x_q, n, &mut acc) };
+            let ws = w.row_scale(row);
+            for j in 0..n {
+                row_out[j] = ws * x_scale[j] * acc[j] as f32;
+            }
+        });
+    }
 }
 
 /// Dot product of ternary row `row` with float slice `x`, 8-wide AVX2.
@@ -128,6 +149,116 @@ unsafe fn avx2_gemm_row(
                 _mm256_storeu_ps(row_out.as_mut_ptr().add(off), _mm256_sub_ps(a, b));
             }
             for j in (chunks * 8)..n { row_out[j] -= xrow[j]; }
+        }
+    }
+}
+
+/// Integer dot of ternary row `row` with an int8 activation slice, 32 lanes per
+/// iteration on AVX2. Returns the i32 sum Σ_k W[m,k]·x_q[k].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_qdot_row(w: &TernaryTensor, row: usize, x_q: &[i8]) -> i32 {
+    use std::arch::x86_64::*;
+
+    let cols = w.cols;
+    let nz = &w.nonzero;
+    let sg = &w.sign;
+    let nlen = nz.len();
+    let mut acc = _mm256_setzero_si256();
+
+    // Per-lane bit selector (0x80 = -128 as i8) and a shuffle that broadcasts
+    // byte (lane/8) of the packed 32-bit mask into each group of 8 lanes.
+    let sel = _mm256_setr_epi8(
+        1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128,
+        1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128,
+    );
+    let bcast = _mm256_setr_epi8(
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
+        2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3,
+    );
+    let ones_u8 = _mm256_set1_epi8(1);
+    let ones_i16 = _mm256_set1_epi16(1);
+
+    let chunks = cols / 32;
+    for chunk in 0..chunks {
+        let base = row * cols + chunk * 32;
+        let byte = base >> 3;
+        let off  = base & 7;
+
+        // 32 bits at `off` span up to 5 bytes; read (guarded) and shift down.
+        let rd = |b: &[u8]| -> u32 {
+            let mut acc: u64 = 0;
+            for t in 0..5 {
+                if byte + t < nlen { acc |= (b[byte + t] as u64) << (8 * t); }
+            }
+            ((acc >> off) & 0xFFFF_FFFF) as u32
+        };
+        let nz32 = rd(nz);
+        let sg32 = rd(sg);
+
+        let nz_bytes = _mm256_shuffle_epi8(_mm256_set1_epi32(nz32 as i32), bcast);
+        let sg_bytes = _mm256_shuffle_epi8(_mm256_set1_epi32(sg32 as i32), bcast);
+        let nz_mask = _mm256_cmpeq_epi8(_mm256_and_si256(nz_bytes, sel), sel);
+        let sg_mask = _mm256_cmpeq_epi8(_mm256_and_si256(sg_bytes, sel), sel);
+
+        let xq  = _mm256_loadu_si256(x_q.as_ptr().add(chunk * 32) as *const __m256i);
+        let neg = _mm256_sub_epi8(_mm256_setzero_si256(), xq);
+        // -x_q where negative (mask MSB set), x_q elsewhere; then zero where W==0.
+        let signed = _mm256_blendv_epi8(xq, neg, sg_mask);
+        let val = _mm256_and_si256(signed, nz_mask);
+
+        // Sum 32×i8 → 8×i32: pairwise add via maddubs(1,·) then madd(·,1).
+        let t16 = _mm256_maddubs_epi16(ones_u8, val);
+        let t32 = _mm256_madd_epi16(t16, ones_i16);
+        acc = _mm256_add_epi32(acc, t32);
+    }
+
+    let mut tmp = [0i32; 8];
+    _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
+    let mut result: i32 = tmp.iter().sum();
+
+    // Tail columns (cols % 32) accumulated scalar-wise.
+    for col in (chunks * 32)..cols {
+        let i = row * cols + col;
+        let nzb = (nz[i / 8] >> (i % 8)) & 1;
+        if nzb == 1 {
+            let sgb = (sg[i / 8] >> (i % 8)) & 1;
+            if sgb == 0 { result += x_q[col] as i32; }
+            else         { result -= x_q[col] as i32; }
+        }
+    }
+    result
+}
+
+/// Accumulate one GEMM output row's i32 sums by streaming nonzero weight
+/// columns over the contiguous int8 Xq rows, widening i8→i32, 8 cols/iter.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_qgemm_accumulate(w: &TernaryTensor, row: usize, x_q: &[i8], n: usize, acc: &mut [i32]) {
+    use std::arch::x86_64::*;
+
+    let cols = w.cols;
+    let chunks = n / 8;
+    for k in 0..cols {
+        let i  = row * cols + k;
+        let nz = (w.nonzero[i / 8] >> (i % 8)) & 1;
+        if nz == 0 { continue; }
+        let sg = (w.sign[i / 8] >> (i % 8)) & 1;
+        let xrow = x_q.as_ptr().add(k * n);
+
+        for c in 0..chunks {
+            let off = c * 8;
+            let v8 = _mm_loadl_epi64(xrow.add(off) as *const __m128i);
+            let wv = _mm256_cvtepi8_epi32(v8);
+            let ap = acc.as_mut_ptr().add(off) as *mut __m256i;
+            let cur = _mm256_loadu_si256(ap as *const __m256i);
+            let nv = if sg == 0 { _mm256_add_epi32(cur, wv) } else { _mm256_sub_epi32(cur, wv) };
+            _mm256_storeu_si256(ap, nv);
+        }
+        if sg == 0 {
+            for j in (chunks * 8)..n { acc[j] += *xrow.add(j) as i32; }
+        } else {
+            for j in (chunks * 8)..n { acc[j] -= *xrow.add(j) as i32; }
         }
     }
 }
@@ -236,6 +367,53 @@ mod tests {
         for i in 0..60 {
             assert!((y_scalar[i] - y_avx2[i]).abs() < 1e-3,
                 "element {}: scalar={} avx2={}", i, y_scalar[i], y_avx2[i]);
+        }
+    }
+
+    #[test]
+    fn test_avx2_qgemv_matches_scalar() {
+        use crate::quantize;
+        // Cover aligned (32-multiple) and unaligned cols (straddle + tail).
+        for &cols in &[32usize, 40, 64, 77, 128] {
+            let rows = 9;
+            let data: Vec<f32> =
+                (0..rows * cols).map(|i| ((i * 5) % 3) as f32 - 1.0).collect();
+            let w = make_tensor(&data, rows, cols);
+            let xf: Vec<f32> = (0..cols).map(|i| (i as f32 * 0.3).sin() * 4.0).collect();
+            let (x_q, x_scale) = quantize::quantize_act(&xf);
+
+            let mut y_scalar = vec![0.0f32; rows];
+            let mut y_avx2 = vec![0.0f32; rows];
+            Scalar.qgemv(&w, &x_q, x_scale, &mut y_scalar);
+            Avx2.qgemv(&w, &x_q, x_scale, &mut y_avx2);
+
+            for i in 0..rows {
+                assert!((y_scalar[i] - y_avx2[i]).abs() < 1e-3,
+                    "cols={} row {}: scalar={} avx2={}", cols, i, y_scalar[i], y_avx2[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_avx2_qgemm_matches_scalar() {
+        use crate::quantize;
+        for &(rows, cols, n) in &[(9usize, 64usize, 8usize), (12, 40, 10), (8, 77, 16)] {
+            let data: Vec<f32> =
+                (0..rows * cols).map(|i| ((i * 7) % 3) as f32 - 1.0).collect();
+            let w = make_tensor(&data, rows, cols);
+            let xf: Vec<f32> = (0..cols * n).map(|i| (i as f32 * 0.07).sin() * 3.0).collect();
+            let (x_q, x_scale) = quantize::quantize_act_2d(&xf, cols, n);
+
+            let mut y_scalar = vec![0.0f32; rows * n];
+            let mut y_avx2 = vec![0.0f32; rows * n];
+            Scalar.qgemm(&w, &x_q, &x_scale, n, &mut y_scalar);
+            Avx2.qgemm(&w, &x_q, &x_scale, n, &mut y_avx2);
+
+            for i in 0..rows * n {
+                assert!((y_scalar[i] - y_avx2[i]).abs() < 1e-3,
+                    "({},{},{}) elem {}: scalar={} avx2={}",
+                    rows, cols, n, i, y_scalar[i], y_avx2[i]);
+            }
         }
     }
 }
