@@ -5,16 +5,26 @@ edition = "2021"
 
 [lib]
 name       = "_trimat"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# maturin adds this feature automatically via pyproject.toml.
+# Do NOT enable it here; cargo test/bench need to link Python directly.
+extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-pyo3    = { version = "0.28", features = ["extension-module"] }
+pyo3    = { version = "0.28" }
 numpy   = "0.28"
 ndarray = "0.17"
 rayon   = "1.10"
 
 [dev-dependencies]
-proptest = "1.5"
+proptest  = "1.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name    = "gemv_bench"
+harness = false
 
 [profile.release]
 lto       = true

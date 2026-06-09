@@ -1,3 +1,5 @@
+use rayon::prelude::*;
+
 use crate::kernels::Kernel;
 use crate::tensor::TernaryTensor;
 
@@ -5,7 +7,7 @@ pub struct Scalar;
 
 impl Kernel for Scalar {
     fn gemv(&self, w: &TernaryTensor, x: &[f32], y: &mut [f32]) {
-        for row in 0..w.rows {
+        y.par_iter_mut().enumerate().for_each(|(row, out)| {
             let mut acc = 0.0f32;
             for col in 0..w.cols {
                 match w.get(row, col) {
@@ -14,14 +16,14 @@ impl Kernel for Scalar {
                      _ => {}
                 }
             }
-            y[row] = acc * w.row_scale(row);
-        }
+            *out = acc * w.row_scale(row);
+        });
     }
 
     fn gemm(&self, w: &TernaryTensor, x: &[f32], n: usize, y: &mut [f32]) {
         // x: (K×N) row-major → x[col*n + j]
         // y: (M×N) row-major → y[row*n + j]
-        for row in 0..w.rows {
+        y.par_chunks_mut(n).enumerate().for_each(|(row, row_out)| {
             for j in 0..n {
                 let mut acc = 0.0f32;
                 for col in 0..w.cols {
@@ -31,9 +33,9 @@ impl Kernel for Scalar {
                          _ => {}
                     }
                 }
-                y[row * n + j] = acc * w.row_scale(row);
+                row_out[j] = acc * w.row_scale(row);
             }
-        }
+        });
     }
 }
 

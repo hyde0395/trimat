@@ -21,7 +21,7 @@ impl TernaryTensor {
         Self { rows, cols, nonzero, sign, scale }
     }
 
-    /// 요소 (row, col)의 ternary 값 {-1,0,1} 반환.
+    /// Returns the ternary value {-1, 0, 1} at (row, col).
     #[inline]
     pub fn get(&self, row: usize, col: usize) -> i8 {
         let i  = row * self.cols + col;

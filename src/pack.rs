@@ -1,5 +1,6 @@
-/// i8 슬라이스(값 ∈ {-1,0,1})를 두 비트플레인으로 인코딩.
-/// 반환: (nonzero_plane, sign_plane) — 각 ceil(n/8) 바이트
+/// Encode an i8 slice (values in {-1, 0, 1}) into two bitplanes.
+/// Returns (nonzero_plane, sign_plane), each ceil(n/8) bytes.
+/// Layout: element i -> byte i/8, bit i%8 (LSB first).
 pub fn encode(vals: &[i8]) -> (Vec<u8>, Vec<u8>) {
     let bytes = bit_len(vals.len());
     let mut nonzero = vec![0u8; bytes];
@@ -11,7 +12,8 @@ pub fn encode(vals: &[i8]) -> (Vec<u8>, Vec<u8>) {
     (nonzero, sign)
 }
 
-/// 비트플레인 두 개를 i8 슬라이스로 복원.
+/// Reconstruct an i8 slice from two bitplanes.
+/// Decode rule: nz=0 -> 0 / nz=1,sg=0 -> +1 / nz=1,sg=1 -> -1
 pub fn decode(nonzero: &[u8], sign: &[u8], n: usize) -> Vec<i8> {
     (0..n)
         .map(|i| {

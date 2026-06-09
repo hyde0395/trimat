@@ -1,20 +1,29 @@
-use crate::kernels::{scalar::Scalar, Kernel};
+use crate::kernels::Kernel;
 
 pub struct DispatchInfo {
     pub backend: &'static str,
     pub threads: usize,
 }
 
-/// 현재 런타임에서 최적 커널을 반환한다.
-/// P0: scalar 고정. P1: aarch64 NEON 분기 추가.
+/// Returns the best available kernel for the current runtime.
+/// On aarch64: NEON with rayon parallelism.
+/// Elsewhere: parallel scalar.
 pub fn best_kernel() -> Box<dyn Kernel> {
-    Box::new(Scalar)
+    #[cfg(target_arch = "aarch64")]
+    { Box::new(crate::kernels::neon::Neon) }
+    #[cfg(not(target_arch = "aarch64"))]
+    { Box::new(crate::kernels::scalar::Scalar) }
 }
 
-/// cpu_features() Python 함수에 전달할 런타임 정보.
+/// Runtime info passed to the cpu_features() Python function.
 pub fn dispatch_info() -> DispatchInfo {
+    #[cfg(target_arch = "aarch64")]
+    let backend = "neon";
+    #[cfg(not(target_arch = "aarch64"))]
+    let backend = "scalar";
+
     DispatchInfo {
-        backend: "scalar",
-        threads: 1,
+        backend,
+        threads: rayon::current_num_threads(),
     }
 }

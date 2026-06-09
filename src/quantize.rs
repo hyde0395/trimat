@@ -1,5 +1,6 @@
-/// FP32 배열을 absmax 방식으로 {-1,0,+1} i8로 양자화한다.
-/// 반환: (quantized, scale) — scale=max(|w|), 복원식: w ≈ quantized * scale
+/// Quantize a FP32 slice to ternary {-1, 0, +1} using absmax scaling.
+/// Returns (quantized, scale) where scale = max(|w|).
+/// Reconstruction: w ≈ quantized * scale
 pub fn absmax_quantize(w: &[f32]) -> (Vec<i8>, f32) {
     let max_abs = w.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
     if max_abs == 0.0 {

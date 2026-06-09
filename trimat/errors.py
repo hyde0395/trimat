@@ -1,14 +1,14 @@
 class TrimatError(Exception):
-    """trimat 기반 예외 — 모든 trimat 에러의 상위 클래스."""
+    """Base exception for all trimat errors."""
 
 
 class PackError(TrimatError):
-    """패킹·양자화 입력이 잘못됐을 때."""
+    """Raised when packing or quantization input is invalid."""
 
 
 class KernelError(TrimatError):
-    """GEMV/GEMM 연산 인자가 잘못됐을 때."""
+    """Raised when GEMV/GEMM arguments are invalid."""
 
 
 class LoaderError(TrimatError):
-    """HuggingFace 모델 로딩 실패 시 (P3에서 사용)."""
+    """Raised when HuggingFace model loading fails (used in P3)."""
