@@ -24,6 +24,12 @@ impl Kernel for Neon {
             }
         });
     }
+
+    fn qgemv(&self, w: &TernaryTensor, x_q: &[i8], x_scale: f32, y: &mut [f32]) {
+        y.par_iter_mut().enumerate().for_each(|(row, out)| {
+            *out = neon_qdot_row(w, row, x_q) as f32 * w.row_scale(row) * x_scale;
+        });
+    }
 }
 
 /// Accumulate one GEMM output row (length `n`) by streaming nonzero weight
@@ -149,6 +155,74 @@ fn neon_dot_row(w: &TernaryTensor, row: usize, x: &[f32]) -> f32 {
     acc
 }
 
+/// Integer dot product of ternary row `row` with an int8 activation slice,
+/// 16 lanes per iteration on NEON. Returns the i32 sum Σ_k W[m,k]·x_q[k].
+#[cfg(target_arch = "aarch64")]
+fn neon_qdot_row(w: &TernaryTensor, row: usize, x_q: &[i8]) -> i32 {
+    use std::arch::aarch64::*;
+    unsafe {
+        let cols = w.cols;
+        let nz = &w.nonzero;
+        let sg = &w.sign;
+        let nlen = nz.len();
+        let mut acc = vdupq_n_s32(0);
+
+        // Lane k tests bit (k%8) of byte0 (lanes 0..8) or byte1 (lanes 8..16).
+        let sel = vld1q_u8(
+            [1u8, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128].as_ptr(),
+        );
+
+        let chunks = cols / 16;
+        for chunk in 0..chunks {
+            let base = row * cols + chunk * 16; // global bit index of 16 weights
+            let byte = base >> 3;
+            let off  = base & 7;
+
+            // 16 bits at `off` span up to 3 bytes; read them (guarded) and shift.
+            let rd = |b: &[u8]| -> u32 {
+                let b0 = b[byte] as u32;
+                let b1 = if byte + 1 < nlen { b[byte + 1] as u32 } else { 0 };
+                let b2 = if byte + 2 < nlen { b[byte + 2] as u32 } else { 0 };
+                ((b0 | (b1 << 8) | (b2 << 16)) >> off) & 0xFFFF
+            };
+            let nz16 = rd(nz);
+            let sg16 = rd(sg);
+
+            // Broadcast low byte to lanes 0..8, high byte to lanes 8..16, then
+            // test bits to build per-lane all-ones masks.
+            let nz_bytes = vcombine_u8(
+                vdup_n_u8((nz16 & 0xFF) as u8), vdup_n_u8((nz16 >> 8) as u8));
+            let sg_bytes = vcombine_u8(
+                vdup_n_u8((sg16 & 0xFF) as u8), vdup_n_u8((sg16 >> 8) as u8));
+            let nz_mask = vtstq_u8(nz_bytes, sel);
+            let sg_mask = vtstq_u8(sg_bytes, sel);
+
+            let xq  = vld1q_s8(x_q.as_ptr().add(chunk * 16));
+            let neg = vnegq_s8(xq);
+            // -x_q where negative, +x_q where positive; then zero where weight==0.
+            let signed = vbslq_s8(sg_mask, neg, xq);
+            let val = vandq_s8(signed, vreinterpretq_s8_u8(nz_mask));
+
+            // Widen-accumulate 16×i8 → 8×i16 → 4×i32.
+            acc = vpadalq_s16(acc, vpaddlq_s8(val));
+        }
+
+        let mut result = vaddvq_s32(acc);
+
+        // Tail columns (cols % 16) accumulated scalar-wise.
+        for col in (chunks * 16)..cols {
+            let i = row * cols + col;
+            let nzb = (nz[i / 8] >> (i % 8)) & 1;
+            if nzb == 1 {
+                let sgb = (sg[i / 8] >> (i % 8)) & 1;
+                if sgb == 0 { result += x_q[col] as i32; }
+                else         { result -= x_q[col] as i32; }
+            }
+        }
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +309,30 @@ mod tests {
         for i in 0..rows * n {
             assert!((y_scalar[i] - y_neon[i]).abs() < 1e-3,
                 "elem {}: scalar={} neon={}", i, y_scalar[i], y_neon[i]);
+        }
+    }
+
+    #[test]
+    fn test_neon_qgemv_matches_scalar() {
+        use crate::quantize;
+        // Cover aligned (16-multiple) and unaligned cols (straddling + tail).
+        for &cols in &[16usize, 19, 32, 45, 64] {
+            let rows = 9;
+            let data: Vec<f32> =
+                (0..rows * cols).map(|i| ((i * 5) % 3) as f32 - 1.0).collect();
+            let w = make_tensor(&data, rows, cols);
+            let xf: Vec<f32> = (0..cols).map(|i| (i as f32 * 0.3).sin() * 4.0).collect();
+            let (x_q, x_scale) = quantize::quantize_act(&xf);
+
+            let mut y_scalar = vec![0.0f32; rows];
+            let mut y_neon = vec![0.0f32; rows];
+            Scalar.qgemv(&w, &x_q, x_scale, &mut y_scalar);
+            Neon.qgemv(&w, &x_q, x_scale, &mut y_neon);
+
+            for i in 0..rows {
+                assert!((y_scalar[i] - y_neon[i]).abs() < 1e-3,
+                    "cols={} row {}: scalar={} neon={}", cols, i, y_scalar[i], y_neon[i]);
+            }
         }
     }
 }

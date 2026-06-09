@@ -22,6 +22,11 @@ def gemv(w: TernaryTensor, x: NDArray[np.float32]) -> NDArray[np.float32]:
     """Compute ``w (M×K) · x (K) -> y (M)``."""
     ...
 
+def qgemv(w: TernaryTensor, x: NDArray[np.float32]) -> NDArray[np.float32]:
+    """BitNet-style GEMV: quantize x to int8 (per-tensor absmax) then compute
+    ``w (M×K) · x (K) -> y (M)`` with integer accumulation. Lossy vs gemv."""
+    ...
+
 def gemm(w: TernaryTensor, x: NDArray[np.float32]) -> NDArray[np.float32]:
     """Compute ``w (M×K) · X (K×N) -> Y (M×N)``."""
     ...

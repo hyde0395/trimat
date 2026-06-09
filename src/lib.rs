@@ -61,6 +61,32 @@ fn gemv<'py>(
     Ok(Array1::from(y).into_pyarray(py))
 }
 
+/// BitNet-style GEMV: quantize x to int8 (per-tensor absmax) then compute
+/// w(M×K) · x(K) → y(M) with integer accumulation. Lossy vs gemv (int8 x), but
+/// avoids FP32 multiplies in the inner loop.
+#[pyfunction]
+fn qgemv<'py>(
+    py: Python<'py>,
+    w: &TernaryTensor,
+    x: PyReadonlyArray1<'py, f32>,
+) -> PyResult<Bound<'py, PyArray1<f32>>> {
+    let xlen = x.shape()[0];
+    if xlen != w.cols {
+        return Err(PyValueError::new_err(format!(
+            "x length {} != tensor cols {}", xlen, w.cols
+        )));
+    }
+    let x_owned;
+    let x_slice: &[f32] = match x.as_slice() {
+        Ok(s) => s,
+        Err(_) => { x_owned = x.as_array().to_vec(); &x_owned }
+    };
+    let (x_q, x_scale) = quantize::quantize_act(x_slice);
+    let mut y = vec![0.0f32; w.rows];
+    dispatch::kernel().qgemv(w, &x_q, x_scale, &mut y);
+    Ok(Array1::from(y).into_pyarray(py))
+}
+
 /// Compute ternary matrix w(M×K) · matrix X(K×N) → matrix Y(M×N). X shape: (K, N).
 #[pyfunction]
 fn gemm<'py>(
@@ -106,6 +132,7 @@ fn _trimat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TernaryTensor>()?;
     m.add_function(wrap_pyfunction!(pack_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(gemv, m)?)?;
+    m.add_function(wrap_pyfunction!(qgemv, m)?)?;
     m.add_function(wrap_pyfunction!(gemm, m)?)?;
     m.add_function(wrap_pyfunction!(cpu_features, m)?)?;
     Ok(())
