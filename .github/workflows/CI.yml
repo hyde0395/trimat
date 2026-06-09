@@ -66,12 +66,12 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          # safetensors is light and has wheels everywhere, so the loader tests
-          # run here; torch is exercised in the dedicated python-tests job.
-          python -m pip install numpy pytest safetensors
+          python -m pip install numpy
           python -m pip install --no-index --find-links dist trimat
-          python -c "import trimat; print(trimat.cpu_features())"
-          python -m pytest tests/ -v
+          # Run from a fresh empty dir so the *installed wheel* is imported, not
+          # the local ./trimat source package (which has no compiled extension).
+          mkdir -p _smoke && cd _smoke
+          python -c "import numpy as np, trimat; t=trimat.pack(np.eye(8,dtype=np.float32)); x=np.arange(8,dtype=np.float32); assert np.allclose(trimat.gemv(t,x),x); assert np.allclose(trimat.qgemv(t,x),x,atol=0.1); print('smoke OK:', trimat.cpu_features())"
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
@@ -90,11 +90,14 @@ jobs:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install deps and build extension
+      - name: Build extension in a venv and run Python tests
+        # maturin develop requires an active virtualenv; create one so the built
+        # extension lands in ./trimat and `import trimat` resolves locally.
         run: |
+          python -m venv .venv
+          . .venv/bin/activate
           python -m pip install --upgrade pip
           python -m pip install maturin numpy pytest safetensors
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           maturin develop --release --features extension-module
-      - name: pytest
-        run: python -m pytest tests/ -v
+          python -m pytest tests/ -v
