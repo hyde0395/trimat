@@ -217,4 +217,24 @@ mod tests {
                 "element {}: scalar={} neon={}", i, y_scalar[i], y_neon[i]);
         }
     }
+
+    #[test]
+    fn test_neon_matches_scalar_gemm_large() {
+        // Larger M with odd cols and an N tail (n % 4 != 0).
+        let (rows, cols, n) = (20usize, 19usize, 10usize);
+        let data: Vec<f32> =
+            (0..rows * cols).map(|i| ((i * 7) % 3) as f32 - 1.0).collect();
+        let w = make_tensor(&data, rows, cols);
+        let x: Vec<f32> = (0..cols * n).map(|i| (i as f32 * 0.05).sin()).collect();
+
+        let mut y_scalar = vec![0.0f32; rows * n];
+        let mut y_neon = vec![0.0f32; rows * n];
+        Scalar.gemm(&w, &x, n, &mut y_scalar);
+        Neon.gemm(&w, &x, n, &mut y_neon);
+
+        for i in 0..rows * n {
+            assert!((y_scalar[i] - y_neon[i]).abs() < 1e-3,
+                "elem {}: scalar={} neon={}", i, y_scalar[i], y_neon[i]);
+        }
+    }
 }

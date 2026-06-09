@@ -179,6 +179,26 @@ mod tests {
     }
 
     #[test]
+    fn test_avx2_matches_scalar_gemm_large() {
+        // Larger M with odd cols and an N tail (n % 8 != 0).
+        let (rows, cols, n) = (20usize, 19usize, 10usize);
+        let data: Vec<f32> =
+            (0..rows * cols).map(|i| ((i * 7) % 3) as f32 - 1.0).collect();
+        let w = make_tensor(&data, rows, cols);
+        let x: Vec<f32> = (0..cols * n).map(|i| (i as f32 * 0.05).sin()).collect();
+
+        let mut y_scalar = vec![0.0f32; rows * n];
+        let mut y_avx2 = vec![0.0f32; rows * n];
+        Scalar.gemm(&w, &x, n, &mut y_scalar);
+        Avx2.gemm(&w, &x, n, &mut y_avx2);
+
+        for i in 0..rows * n {
+            assert!((y_scalar[i] - y_avx2[i]).abs() < 1e-3,
+                "elem {}: scalar={} avx2={}", i, y_scalar[i], y_avx2[i]);
+        }
+    }
+
+    #[test]
     fn test_avx2_matches_scalar_gemv_unaligned_cols() {
         // cols not a multiple of 8 exercises the straddling two-byte read and
         // the scalar tail in the vectorized decode.
