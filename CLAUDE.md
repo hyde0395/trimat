@@ -104,6 +104,13 @@ P4: Release
 
 ---
 
+## Code Style
+
+**All comments must be written in English** — both `//`, `///` (Rust) and `#`, docstrings (Python).
+Do not write comments in Korean. If you find existing Korean comments, convert them to English.
+
+---
+
 ## Dev Environment
 
 - Main dev machine: M4 Mac mini (aarch64, NEON native)
