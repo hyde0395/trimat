@@ -1,0 +1,15 @@
+[build-system]
+requires      = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name            = "trimat"
+version         = "0.1.0"
+description     = "Ternary matrix multiplication — Rust+SIMD, pip one-liner"
+requires-python = ">=3.9"
+dependencies    = ["numpy>=1.24"]
+
+[tool.maturin]
+features      = ["pyo3/extension-module"]
+module-name   = "trimat._trimat"
+python-source = "."
