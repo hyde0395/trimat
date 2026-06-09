@@ -30,6 +30,67 @@ impl Kernel for Neon {
             *out = neon_qdot_row(w, row, x_q) as f32 * w.row_scale(row) * x_scale;
         });
     }
+
+    fn qgemm(
+        &self, w: &TernaryTensor, x_q: &[i8], x_scale: &[f32], n: usize, y: &mut [f32],
+    ) {
+        y.par_chunks_mut(n).enumerate().for_each(|(row, row_out)| {
+            let mut acc = vec![0i32; n];
+            neon_qgemm_accumulate(w, row, x_q, n, &mut acc);
+            let ws = w.row_scale(row);
+            for j in 0..n {
+                row_out[j] = ws * x_scale[j] * acc[j] as f32;
+            }
+        });
+    }
+}
+
+/// Accumulate one GEMM output row's i32 sums by streaming nonzero weight
+/// columns over the contiguous int8 Xq rows, widening i8→i32, 16 cols/iter.
+#[cfg(target_arch = "aarch64")]
+fn neon_qgemm_accumulate(w: &TernaryTensor, row: usize, x_q: &[i8], n: usize, acc: &mut [i32]) {
+    use std::arch::aarch64::*;
+    unsafe {
+        let cols = w.cols;
+        let chunks = n / 16;
+        for k in 0..cols {
+            let i  = row * cols + k;
+            let nz = (w.nonzero[i / 8] >> (i % 8)) & 1;
+            if nz == 0 { continue; }
+            let sg = (w.sign[i / 8] >> (i % 8)) & 1;
+            let xrow = x_q.as_ptr().add(k * n);
+
+            for c in 0..chunks {
+                let off = c * 16;
+                let v = vld1q_s8(xrow.add(off));
+                // Widen 16×i8 -> 4×(4×i32).
+                let lo16 = vmovl_s8(vget_low_s8(v));
+                let hi16 = vmovl_s8(vget_high_s8(v));
+                let w0 = vmovl_s16(vget_low_s16(lo16));
+                let w1 = vmovl_s16(vget_high_s16(lo16));
+                let w2 = vmovl_s16(vget_low_s16(hi16));
+                let w3 = vmovl_s16(vget_high_s16(hi16));
+                let ap = acc.as_mut_ptr().add(off);
+                if sg == 0 {
+                    vst1q_s32(ap,        vaddq_s32(vld1q_s32(ap),        w0));
+                    vst1q_s32(ap.add(4), vaddq_s32(vld1q_s32(ap.add(4)), w1));
+                    vst1q_s32(ap.add(8), vaddq_s32(vld1q_s32(ap.add(8)), w2));
+                    vst1q_s32(ap.add(12),vaddq_s32(vld1q_s32(ap.add(12)),w3));
+                } else {
+                    vst1q_s32(ap,        vsubq_s32(vld1q_s32(ap),        w0));
+                    vst1q_s32(ap.add(4), vsubq_s32(vld1q_s32(ap.add(4)), w1));
+                    vst1q_s32(ap.add(8), vsubq_s32(vld1q_s32(ap.add(8)), w2));
+                    vst1q_s32(ap.add(12),vsubq_s32(vld1q_s32(ap.add(12)),w3));
+                }
+            }
+            // Tail columns (n % 16).
+            if sg == 0 {
+                for j in (chunks * 16)..n { acc[j] += *xrow.add(j) as i32; }
+            } else {
+                for j in (chunks * 16)..n { acc[j] -= *xrow.add(j) as i32; }
+            }
+        }
+    }
 }
 
 /// Accumulate one GEMM output row (length `n`) by streaming nonzero weight
@@ -332,6 +393,30 @@ mod tests {
             for i in 0..rows {
                 assert!((y_scalar[i] - y_neon[i]).abs() < 1e-3,
                     "cols={} row {}: scalar={} neon={}", cols, i, y_scalar[i], y_neon[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_neon_qgemm_matches_scalar() {
+        use crate::quantize;
+        // Cover aligned/unaligned cols and an N tail (n % 16 != 0).
+        for &(rows, cols, n) in &[(9usize, 32usize, 16usize), (12, 19, 10), (8, 64, 20)] {
+            let data: Vec<f32> =
+                (0..rows * cols).map(|i| ((i * 7) % 3) as f32 - 1.0).collect();
+            let w = make_tensor(&data, rows, cols);
+            let xf: Vec<f32> = (0..cols * n).map(|i| (i as f32 * 0.07).sin() * 3.0).collect();
+            let (x_q, x_scale) = quantize::quantize_act_2d(&xf, cols, n);
+
+            let mut y_scalar = vec![0.0f32; rows * n];
+            let mut y_neon = vec![0.0f32; rows * n];
+            Scalar.qgemm(&w, &x_q, &x_scale, n, &mut y_scalar);
+            Neon.qgemm(&w, &x_q, &x_scale, n, &mut y_neon);
+
+            for i in 0..rows * n {
+                assert!((y_scalar[i] - y_neon[i]).abs() < 1e-3,
+                    "({},{},{}) elem {}: scalar={} neon={}",
+                    rows, cols, n, i, y_scalar[i], y_neon[i]);
             }
         }
     }

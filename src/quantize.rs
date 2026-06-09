@@ -31,9 +31,55 @@ pub fn quantize_act(x: &[f32]) -> (Vec<i8>, f32) {
     (q, scale)
 }
 
+/// Quantize an FP32 activation matrix `x` of shape (k, n) row-major to int8
+/// using a per-column (per-token) absmax/127 scale. Returns (q, scales) where
+/// `scales` has length n. A column of all zeros gets scale 0.0 and codes 0.
+pub fn quantize_act_2d(x: &[f32], k: usize, n: usize) -> (Vec<i8>, Vec<f32>) {
+    let mut scales = vec![0.0f32; n];
+    for j in 0..n {
+        let mut max_abs = 0.0f32;
+        for r in 0..k {
+            max_abs = max_abs.max(x[r * n + j].abs());
+        }
+        scales[j] = max_abs / 127.0;
+    }
+    let mut q = vec![0i8; k * n];
+    for r in 0..k {
+        for j in 0..n {
+            let s = scales[j];
+            if s != 0.0 {
+                q[r * n + j] = (x[r * n + j] / s).round().clamp(-127.0, 127.0) as i8;
+            }
+        }
+    }
+    (q, scales)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_quantize_act_2d_per_column() {
+        // Column 0 ranges to 10, column 1 to 1 -> different scales.
+        let x = [10.0f32, 1.0, -5.0, -0.5, 0.0, 0.25];
+        let (q, s) = quantize_act_2d(&x, 3, 2);
+        assert!((s[0] - 10.0 / 127.0).abs() < 1e-9);
+        assert!((s[1] - 1.0 / 127.0).abs() < 1e-9);
+        assert_eq!(q[0], 127); // x[0,0]=10.0 / (10/127)
+        assert_eq!(q[2], -64); // x[1,0]=-5.0 -> round(-63.5)
+        assert_eq!(q[1], 127); // x[0,1]=1.0 in column 1
+    }
+
+    #[test]
+    fn test_quantize_act_2d_zero_column() {
+        let x = [0.0f32, 2.0, 0.0, -2.0];
+        let (q, s) = quantize_act_2d(&x, 2, 2);
+        assert_eq!(s[0], 0.0);
+        assert_eq!(q[0], 0);
+        assert_eq!(q[2], 0);
+        assert_eq!(q[1], 127); // column 1 max 2.0
+    }
 
     #[test]
     fn test_quantize_act_basic() {

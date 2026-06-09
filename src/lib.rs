@@ -117,6 +117,37 @@ fn gemm<'py>(
     Ok(arr.into_pyarray(py))
 }
 
+/// BitNet-style GEMM: quantize each column (token) of X to int8 (per-column
+/// absmax) then compute w(M×K) · X(K×N) → Y(M×N) with integer accumulation.
+/// Lossy vs gemm (int8 X), but avoids FP32 multiplies in the inner loop.
+#[pyfunction]
+fn qgemm<'py>(
+    py: Python<'py>,
+    w: &TernaryTensor,
+    x: PyReadonlyArray2<'py, f32>,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let x_shape = x.shape();
+    if x_shape[0] != w.cols {
+        return Err(PyValueError::new_err(format!(
+            "x rows {} != tensor cols {}", x_shape[0], w.cols
+        )));
+    }
+    let n = x_shape[1];
+    let x_owned;
+    let x_slice: &[f32] = if x.is_c_contiguous() {
+        x.as_slice()?
+    } else {
+        x_owned = x.to_owned_array().into_raw_vec_and_offset().0;
+        &x_owned
+    };
+    let (x_q, x_scale) = quantize::quantize_act_2d(x_slice, w.cols, n);
+    let mut y = vec![0.0f32; w.rows * n];
+    dispatch::kernel().qgemm(w, &x_q, &x_scale, n, &mut y);
+    let arr = Array2::from_shape_vec((w.rows, n), y)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(arr.into_pyarray(py))
+}
+
 /// Return runtime info dict: {backend, threads}.
 #[pyfunction]
 fn cpu_features<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -134,6 +165,7 @@ fn _trimat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gemv, m)?)?;
     m.add_function(wrap_pyfunction!(qgemv, m)?)?;
     m.add_function(wrap_pyfunction!(gemm, m)?)?;
+    m.add_function(wrap_pyfunction!(qgemm, m)?)?;
     m.add_function(wrap_pyfunction!(cpu_features, m)?)?;
     Ok(())
 }

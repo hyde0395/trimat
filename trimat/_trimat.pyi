@@ -31,6 +31,12 @@ def gemm(w: TernaryTensor, x: NDArray[np.float32]) -> NDArray[np.float32]:
     """Compute ``w (M×K) · X (K×N) -> Y (M×N)``."""
     ...
 
+def qgemm(w: TernaryTensor, x: NDArray[np.float32]) -> NDArray[np.float32]:
+    """BitNet-style GEMM: quantize each column of X to int8 (per-column absmax)
+    then compute ``w (M×K) · X (K×N) -> Y (M×N)`` with integer accumulation.
+    Lossy vs gemm."""
+    ...
+
 def cpu_features() -> dict[str, Any]:
     """Return runtime dispatch info, e.g. ``{"backend": "neon", "threads": 8}``."""
     ...

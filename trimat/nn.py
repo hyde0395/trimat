@@ -48,7 +48,7 @@ class BitLinear(_Base):  # type: ignore[misc, valid-type]
         bias: optional ``(out_features,)`` bias (array or tensor).
     """
 
-    def __init__(self, weight, bias=None) -> None:
+    def __init__(self, weight, bias=None, *, quantized: bool = False) -> None:
         if not _HAS_TORCH:
             raise ImportError(
                 "BitLinear requires PyTorch; install it with `pip install torch`"
@@ -65,6 +65,10 @@ class BitLinear(_Base):  # type: ignore[misc, valid-type]
 
         self.out_features = self._packed.rows
         self.in_features = self._packed.cols
+        # When True, forward quantizes activations to int8 and uses the BitNet
+        # qgemv/qgemm kernels (faster at scale, slightly lossy). When False,
+        # forward is exact f32 via gemv/gemm.
+        self.quantized = quantized
 
         if bias is None:
             self._bias: Optional[np.ndarray] = None
@@ -77,16 +81,18 @@ class BitLinear(_Base):  # type: ignore[misc, valid-type]
             self._bias = b
 
     @classmethod
-    def from_linear(cls, linear) -> "BitLinear":
+    def from_linear(cls, linear, *, quantized: bool = False) -> "BitLinear":
         """Quantize and pack an existing ``torch.nn.Linear`` layer."""
         weight = linear.weight.detach()
         bias = None if linear.bias is None else linear.bias.detach()
-        return cls(weight, bias)
+        return cls(weight, bias, quantized=quantized)
 
     @classmethod
-    def from_packed(cls, tensor: TernaryTensor, bias=None) -> "BitLinear":
+    def from_packed(
+        cls, tensor: TernaryTensor, bias=None, *, quantized: bool = False
+    ) -> "BitLinear":
         """Wrap an already-packed :class:`TernaryTensor` (e.g. from the loader)."""
-        return cls(tensor, bias)
+        return cls(tensor, bias, quantized=quantized)
 
     def forward(self, x):
         is_tensor = _HAS_TORCH and isinstance(x, torch.Tensor)
@@ -101,13 +107,17 @@ class BitLinear(_Base):  # type: ignore[misc, valid-type]
             x_np.reshape(-1, self.in_features), dtype=np.float32
         )
 
+        # int8 BitNet path (qgemv/qgemm) when quantized, else exact f32.
+        vec = trimat.qgemv if self.quantized else trimat.gemv
+        mat = trimat.qgemm if self.quantized else trimat.gemm
+
         if x2d.shape[0] == 1:
             # Single sample -> GEMV. y = W · x.
-            y2d = trimat.gemv(self._packed, x2d[0])[None, :]
+            y2d = vec(self._packed, x2d[0])[None, :]
         else:
             # Batch -> GEMM. trimat computes W(out×in) · X(in×batch) = (out×batch).
             xt = np.ascontiguousarray(x2d.T, dtype=np.float32)
-            y2d = trimat.gemm(self._packed, xt).T
+            y2d = mat(self._packed, xt).T
 
         if self._bias is not None:
             y2d = y2d + self._bias

@@ -32,4 +32,29 @@ pub trait Kernel: Send + Sync {
             *out = w.row_scale(m) * x_scale * acc as f32;
         });
     }
+
+    /// BitNet-style ternary-weight × int8-activation GEMM:
+    /// `Y[m,j] = w_scale[m] · x_scale[j] · Σ_k W[m,k]·Xq[k,j]`, accumulated in
+    /// i32. `x_q` is (K×N) row-major int8; `x_scale` has length N (per column).
+    /// The default streams nonzero weight columns over the contiguous Xq rows
+    /// into a per-row i32 accumulator; SIMD kernels override it.
+    fn qgemm(
+        &self, w: &TernaryTensor, x_q: &[i8], x_scale: &[f32], n: usize, y: &mut [f32],
+    ) {
+        y.par_chunks_mut(n).enumerate().for_each(|(row, row_out)| {
+            let mut acc = vec![0i32; n];
+            for k in 0..w.cols {
+                let xrow = &x_q[k * n..k * n + n];
+                match w.get(row, k) {
+                    1  => for j in 0..n { acc[j] += xrow[j] as i32; },
+                    -1 => for j in 0..n { acc[j] -= xrow[j] as i32; },
+                    _  => {}
+                }
+            }
+            let ws = w.row_scale(row);
+            for j in 0..n {
+                row_out[j] = ws * x_scale[j] * acc[j] as f32;
+            }
+        });
+    }
 }

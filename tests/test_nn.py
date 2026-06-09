@@ -92,3 +92,36 @@ def test_wrong_input_dim_raises():
     layer = BitLinear(_ternary_weight(3, 4))
     with pytest.raises(ValueError):
         layer(torch.randn(2, 5))
+
+
+def test_quantized_single_sample_approximates_reference():
+    w = _ternary_weight(8, 64)
+    layer = BitLinear(w, quantized=True)
+    assert layer.quantized
+    x = torch.randn(64)
+    y = layer(x).numpy()
+    expected = w @ x.numpy()
+    # int8 activation error: bounded by max|x|/127 per term.
+    tol = (np.abs(x.numpy()).max() / 127.0) * 64
+    assert np.max(np.abs(y - expected)) <= tol
+
+
+def test_quantized_batch_approximates_reference():
+    w = _ternary_weight(6, 48)
+    layer = BitLinear(w, quantized=True)
+    x = torch.randn(5, 48)
+    y = layer(x).numpy()
+    expected = x.numpy() @ w.T
+    # Per-row (per-token) int8 error bound.
+    tol = (np.abs(x.numpy()).max(axis=1, keepdims=True) / 127.0) * 48
+    assert np.all(np.abs(y - expected) <= tol + 1e-4)
+
+
+def test_quantized_from_linear_roundtrips_shape():
+    linear = torch.nn.Linear(32, 16)
+    with torch.no_grad():
+        linear.weight.copy_(torch.tensor(_ternary_weight(16, 32)))
+    layer = BitLinear.from_linear(linear, quantized=True)
+    assert layer.quantized
+    y = layer(torch.randn(4, 32))
+    assert y.shape == (4, 16)

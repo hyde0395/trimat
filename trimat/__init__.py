@@ -4,6 +4,7 @@ from trimat._trimat import (
     gemv,
     qgemv,
     gemm,
+    qgemm,
     cpu_features,
 )
 from trimat.errors import TrimatError, PackError, KernelError, LoaderError
@@ -11,7 +12,7 @@ from trimat.errors import TrimatError, PackError, KernelError, LoaderError
 __version__ = "0.1.0"
 __all__ = [
     "TernaryTensor",
-    "pack", "gemv", "qgemv", "gemm", "cpu_features",
+    "pack", "gemv", "qgemv", "gemm", "qgemm", "cpu_features",
     "TrimatError", "PackError", "KernelError", "LoaderError",
     "__version__",
 ]
