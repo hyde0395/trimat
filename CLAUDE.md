@@ -42,8 +42,26 @@ benches/
 └── gemv_bench.rs      # criterion GEMV benchmarks
 ```
 
----
 
+## Project Rationale
+
+The need for trimat is validated by both academia and industry:
+
+**Academic:** ETH Zurich paper (arxiv 2510.06957, Oct 2025) confirms Sparse Ternary GEMM is not
+optimized in existing libraries for Apple Silicon. Their NEON-based SIMD kernels for M-series
+processors achieved up to **5.98x speedup**. Code exists (github.com/fpgasystems/ternaryLLM)
+but it is C++-only — no pip install, no Python bindings.
+
+**Industry:** HuggingFace's official BitNet model page explicitly states:
+"There are no specialized kernels in Transformers — you must use bitnet.cpp to get efficiency benefits."
+
+**The gap trimat fills:** The necessity of ternary SIMD kernels is proven, but a pip-installable
+cross-platform Python library does not exist. trimat is that library.
+
+**Performance target:** The ETH paper's 5.98x is the upper-bound reference. Our NFR (>=3x NumPy FP32)
+is conservative and achievable.
+
+---
 ## Architecture Decisions
 
 ### 1. HF loader lives in Python (loader.py)
