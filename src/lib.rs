@@ -51,6 +51,30 @@ fn pack_tensor(
     Ok(TernaryTensor::new(rows, cols, nonzero, sign, vec![scale]))
 }
 
+/// Reconstruct the dense f32 weight (M×K) = ternary_code · scale.
+///
+/// For the PyTorch/BLAS prefill fallback (`F.linear`). O(M·K); the Python layer
+/// calls this once and caches it, so the 2-bit packing is preserved as long as
+/// only the decode (gemv) path is exercised. Returns a freshly allocated array
+/// (a dense materialization inherently cannot be zero-copy).
+#[pyfunction]
+fn to_dense<'py>(
+    py: Python<'py>, w: &TernaryTensor,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let (rows, cols) = (w.rows, w.cols);
+    let mut data = vec![0.0f32; rows * cols];
+    for r in 0..rows {
+        let s = w.row_scale(r);
+        let base = r * cols;
+        for c in 0..cols {
+            data[base + c] = w.get(r, c) as f32 * s;
+        }
+    }
+    let arr = Array2::from_shape_vec((rows, cols), data)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(arr.into_pyarray(py))
+}
+
 /// Compute ternary matrix w(M×K) · vector x(K) → vector y(M).
 #[pyfunction]
 fn gemv<'py>(
@@ -176,6 +200,7 @@ fn cpu_features<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
 fn _trimat(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TernaryTensor>()?;
     m.add_function(wrap_pyfunction!(pack_tensor, m)?)?;
+    m.add_function(wrap_pyfunction!(to_dense, m)?)?;
     m.add_function(wrap_pyfunction!(gemv, m)?)?;
     m.add_function(wrap_pyfunction!(qgemv, m)?)?;
     m.add_function(wrap_pyfunction!(gemm, m)?)?;

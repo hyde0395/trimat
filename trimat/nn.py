@@ -76,10 +76,18 @@ class BitLinear(_Base):  # type: ignore[misc, valid-type]
 
         self.out_features = self._packed.rows
         self.in_features = self._packed.cols
-        # When True, forward quantizes activations to int8 and uses the BitNet
-        # qgemv/qgemm kernels (faster at scale, slightly lossy). When False,
-        # forward is exact f32 via gemv/gemm.
+        # When True, the decode path quantizes activations to int8 and uses the
+        # BitNet qgemv kernel (faster at scale, slightly lossy). When False,
+        # decode is exact f32 via gemv.
         self.quantized = quantized
+
+        # Lazily-materialized dense weight for the prefill (BLAS) fallback. Built
+        # only on first prefill, so a decode-only deployment keeps the 2-bit
+        # packing (no f32 copy of the weight). Not registered as a buffer (it is
+        # a derived cache, not a parameter); kept off the module's state_dict.
+        self._dense_t: Optional["torch.Tensor"] = None   # f32 (out, in) for torch
+        self._dense_np: Optional[np.ndarray] = None       # f32 (out, in) for numpy
+        self._bias_t: Optional["torch.Tensor"] = None     # bias as a torch tensor
 
         if bias is None:
             self._bias: Optional[np.ndarray] = None
@@ -110,39 +118,76 @@ class BitLinear(_Base):  # type: ignore[misc, valid-type]
         """Wrap an already-packed :class:`TernaryTensor` (e.g. from the loader)."""
         return cls(tensor, bias, quantized=quantized)
 
+    # ---- dense-weight cache for the prefill fallback -------------------------
+    def _dense_weight_torch(self, dtype, device):
+        if self._dense_t is None:
+            # to_dense returns a fresh f32 (out, in) array; share it zero-copy.
+            self._dense_t = torch.from_numpy(trimat.to_dense(self._packed))
+        return self._dense_t.to(dtype=dtype, device=device)
+
+    def _dense_weight_numpy(self) -> np.ndarray:
+        if self._dense_np is None:
+            self._dense_np = trimat.to_dense(self._packed)
+        return self._dense_np
+
+    def _bias_torch(self, dtype, device):
+        if self._bias is None:
+            return None
+        if self._bias_t is None:
+            self._bias_t = torch.from_numpy(self._bias)
+        return self._bias_t.to(dtype=dtype, device=device)
+
     def forward(self, x):
+        """Hybrid routing: decode (1 token) -> Rust ternary kernel (zero-copy);
+        prefill (>1 token) -> PyTorch BLAS/AMX on the dense weight."""
         is_tensor = _HAS_TORCH and isinstance(x, torch.Tensor)
-        x_np = _to_numpy(x)
-        if x_np.shape[-1] != self.in_features:
+
+        last = x.shape[-1]
+        if last != self.in_features:
             raise ValueError(
-                f"input last dim {x_np.shape[-1]} != in_features {self.in_features}"
+                f"input last dim {last} != in_features {self.in_features}"
             )
+        lead = tuple(x.shape[:-1])
+        n_tokens = 1
+        for d in lead:
+            n_tokens *= int(d)
 
-        lead_shape = x_np.shape[:-1]
-        x2d = np.ascontiguousarray(
-            x_np.reshape(-1, self.in_features), dtype=np.float32
-        )
+        # ---- PREFILL (seq_len > 1): hand off to PyTorch's accelerated matmul ----
+        # The Rust ternary kernel loses to AMX/BLAS on batched GEMM, so for >1
+        # token we run F.linear on the dense (dequantized) weight instead.
+        if n_tokens > 1:
+            if is_tensor:
+                w = self._dense_weight_torch(x.dtype, x.device)
+                b = self._bias_torch(x.dtype, x.device)
+                return torch.nn.functional.linear(x, w, b)
+            xn = np.ascontiguousarray(np.asarray(x), dtype=np.float32)
+            y = xn.reshape(-1, self.in_features) @ self._dense_weight_numpy().T
+            if self._bias is not None:
+                y = y + self._bias
+            return y.reshape(*lead, self.out_features)
 
-        # int8 BitNet path (qgemv/qgemm) when quantized, else exact f32.
-        vec = trimat.qgemv if self.quantized else trimat.gemv
-        mat = trimat.qgemm if self.quantized else trimat.gemm
-
-        if x2d.shape[0] == 1:
-            # Single sample -> GEMV. y = W · x.
-            y2d = vec(self._packed, x2d[0])[None, :]
+        # ---- DECODE (seq_len == 1): zero-copy into the Rust ternary kernel ------
+        if is_tensor:
+            # numpy has no bf16; upcasting low-precision tensors copies once.
+            # f32 + contiguous is the true zero-copy path: .numpy() is a view and
+            # rust-numpy's PyReadonlyArray borrows it without copying.
+            xt = x.reshape(-1)
+            if xt.dtype != torch.float32:
+                xt = xt.float()
+            xt = xt.contiguous()
+            x_np = xt.detach().numpy()
         else:
-            # Batch -> GEMM. trimat computes W(out×in) · X(in×batch) = (out×batch).
-            xt = np.ascontiguousarray(x2d.T, dtype=np.float32)
-            y2d = mat(self._packed, xt).T
+            x_np = np.ascontiguousarray(np.reshape(x, -1), dtype=np.float32)
 
+        vec = trimat.qgemv if self.quantized else trimat.gemv
+        y_np = vec(self._packed, x_np)
         if self._bias is not None:
-            y2d = y2d + self._bias
+            y_np = y_np + self._bias
 
-        y = y2d.reshape(*lead_shape, self.out_features)
+        y = y_np.reshape(*lead, self.out_features)
         if is_tensor:
             out = torch.from_numpy(np.ascontiguousarray(y, dtype=np.float32))
-            # Preserve the input dtype (e.g. bf16) so downstream modules match.
-            return out.to(x.dtype)
+            return out.to(x.dtype)  # preserve input dtype for downstream modules
         return y
 
     def extra_repr(self) -> str:

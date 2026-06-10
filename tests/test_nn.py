@@ -141,6 +141,36 @@ def test_bitlinear_absmean_mode():
     np.testing.assert_allclose(layer_mean(x).numpy()[0], 19.0, atol=1e-4)
 
 
+def test_prefill_routes_to_dense_blas():
+    # >1 token must go through F.linear on the DEQUANTIZED weight (BLAS/AMX),
+    # even when quantized=True — so it equals to_dense(W) @ xᵀ exactly, not int8.
+    rng = np.random.default_rng(0)
+    w = (rng.standard_normal((6, 10)) * 3).astype(np.float32)  # lossy quantization
+    layer = BitLinear(w, mode="absmean", quantized=True)
+    dense = trimat.to_dense(layer._packed)  # (6, 10) ternary*scale
+    x = torch.randn(4, 10)  # 4 tokens -> prefill
+    y = layer(x).numpy()
+    np.testing.assert_allclose(y, x.numpy() @ dense.T, atol=1e-4)
+
+
+def test_decode_routes_to_gemv():
+    w = _ternary_weight(5, 8)
+    layer = BitLinear(w)
+    x = torch.arange(8, dtype=torch.float32)  # 1 token -> decode (Rust gemv)
+    np.testing.assert_allclose(layer(x).numpy(), w @ x.numpy(), atol=1e-4)
+
+
+def test_dense_weight_built_lazily_decode_keeps_2bit():
+    # The dense f32 weight must NOT be materialized until the first prefill,
+    # so a decode-only deployment preserves the 2-bit packing.
+    layer = BitLinear(_ternary_weight(4, 6))
+    assert layer._dense_t is None
+    _ = layer(torch.randn(1, 6))   # decode -> no dense weight
+    assert layer._dense_t is None
+    _ = layer(torch.randn(3, 6))   # prefill -> dense weight built + cached
+    assert layer._dense_t is not None
+
+
 def test_quantized_from_linear_roundtrips_shape():
     linear = torch.nn.Linear(32, 16)
     with torch.no_grad():
