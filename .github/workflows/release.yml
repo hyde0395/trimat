@@ -31,8 +31,9 @@ jobs:
             target: aarch64
           - runner: macos-14
             target: aarch64
-          - runner: macos-13
-            target: x86_64
+          - runner: macos-14   # cross-build x86_64 on Apple Silicon (abi3, no
+            target: x86_64      # target interpreter needed) — avoids the slow
+                                # / unavailable macos-13 (Intel) runner queue.
           - runner: windows-latest
             target: x64
     steps:
