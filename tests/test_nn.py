@@ -117,6 +117,20 @@ def test_quantized_batch_approximates_reference():
     assert np.all(np.abs(y - expected) <= tol + 1e-4)
 
 
+def test_forward_accepts_bf16_input():
+    # Real models run in bf16; hidden states reach BitLinear as bf16 tensors,
+    # which numpy cannot consume directly. forward must upcast them.
+    w = _ternary_weight(3, 4)
+    layer = BitLinear(w)
+    x = torch.randn(2, 4).to(torch.bfloat16)
+    y = layer(x)
+    assert y.shape == (2, 3)
+    # drop-in must preserve input dtype so downstream bf16 modules (lm_head) work
+    assert y.dtype == torch.bfloat16
+    expected = x.float().numpy() @ w.T
+    np.testing.assert_allclose(y.float().numpy(), expected, atol=1e-1)
+
+
 def test_bitlinear_absmean_mode():
     # absmean keeps the small values that absmax would zero out under an outlier.
     w = np.array([[10.0, 2.0, 2.0, 2.0]], dtype=np.float32)

@@ -29,9 +29,16 @@ except ImportError:  # pragma: no cover - exercised only without torch installed
 
 
 def _to_numpy(x) -> np.ndarray:
-    """Convert a torch tensor or array-like to a detached numpy array."""
+    """Convert a torch tensor or array-like to a detached numpy array.
+
+    numpy has no bfloat16/float16, so low-precision tensors (as produced by real
+    bf16 models) are upcast to float32 first.
+    """
     if hasattr(x, "detach"):  # torch.Tensor
-        return x.detach().cpu().numpy()
+        t = x.detach().cpu()
+        if t.dtype not in (torch.float32, torch.float64):
+            t = t.float()
+        return t.numpy()
     return np.asarray(x)
 
 
@@ -133,7 +140,9 @@ class BitLinear(_Base):  # type: ignore[misc, valid-type]
 
         y = y2d.reshape(*lead_shape, self.out_features)
         if is_tensor:
-            return torch.from_numpy(np.ascontiguousarray(y, dtype=np.float32))
+            out = torch.from_numpy(np.ascontiguousarray(y, dtype=np.float32))
+            # Preserve the input dtype (e.g. bf16) so downstream modules match.
+            return out.to(x.dtype)
         return y
 
     def extra_repr(self) -> str:
