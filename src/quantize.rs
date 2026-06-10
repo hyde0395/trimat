@@ -9,7 +9,7 @@ pub fn absmax_quantize(w: &[f32]) -> (Vec<i8>, f32) {
     let scale = max_abs;
     let quantized = w
         .iter()
-        .map(|v| (v / scale).round().clamp(-1.0, 1.0) as i8)
+        .map(|v| (v / scale).round_ties_even().clamp(-1.0, 1.0) as i8)
         .collect();
     (quantized, scale)
 }
@@ -30,7 +30,7 @@ pub fn absmean_quantize(w: &[f32]) -> (Vec<i8>, f32) {
     let scale = mean_abs;
     let quantized = w
         .iter()
-        .map(|v| (v / scale).round().clamp(-1.0, 1.0) as i8)
+        .map(|v| (v / scale).round_ties_even().clamp(-1.0, 1.0) as i8)
         .collect();
     (quantized, scale)
 }
@@ -47,7 +47,7 @@ pub fn quantize_act(x: &[f32]) -> (Vec<i8>, f32) {
     let scale = max_abs / 127.0;
     let q = x
         .iter()
-        .map(|v| (v / scale).round().clamp(-127.0, 127.0) as i8)
+        .map(|v| (v / scale).round_ties_even().clamp(-127.0, 127.0) as i8)
         .collect();
     (q, scale)
 }
@@ -69,7 +69,7 @@ pub fn quantize_act_2d(x: &[f32], k: usize, n: usize) -> (Vec<i8>, Vec<f32>) {
         for j in 0..n {
             let s = scales[j];
             if s != 0.0 {
-                q[r * n + j] = (x[r * n + j] / s).round().clamp(-127.0, 127.0) as i8;
+                q[r * n + j] = (x[r * n + j] / s).round_ties_even().clamp(-127.0, 127.0) as i8;
             }
         }
     }
@@ -141,12 +141,33 @@ mod tests {
     fn test_absmean_keeps_nonzeros_under_outlier() {
         // One large outlier collapses absmax (everything else rounds to 0);
         // absmean (BitNet b1.58 formula, gamma = mean|W|) preserves the signal.
-        let w = [10.0f32, 2.0, 2.0, 2.0];
+        // Values chosen away from 0.5 so the result is rounding-rule-independent.
+        let w = [10.0f32, 3.0, 3.0, 3.0];
         let (q, s) = absmean_quantize(&w);
-        assert!((s - 4.0).abs() < 1e-6, "scale={}", s); // mean(|W|) = 16/4
-        assert_eq!(q, vec![1, 1, 1, 1]);
+        assert!((s - 4.75).abs() < 1e-6, "scale={}", s); // mean(|W|) = 19/4
+        assert_eq!(q, vec![1, 1, 1, 1]); // 3/4.75 = 0.63 -> 1
         let (qmax, _) = absmax_quantize(&w);
-        assert_eq!(qmax, vec![1, 0, 0, 0]); // absmax: 2/10 -> 0
+        assert_eq!(qmax, vec![1, 0, 0, 0]); // absmax: 3/10 = 0.3 -> 0
+    }
+
+    #[test]
+    fn test_quantize_rounds_ties_to_even() {
+        // Match torch/numpy round (half-to-even), not Rust's half-away-from-zero,
+        // so trimat reproduces BitNet's quantization at the 0.5 boundary.
+        // mean(|W|) = 2.0; 1.0/2.0 = 0.5 -> 0 (even), 3.0/2.0 = 1.5 -> 2 -> clamp 1.
+        let w = [3.0f32, 1.0, 1.0, 1.0];
+        let (q, s) = absmean_quantize(&w);
+        assert!((s - 1.5).abs() < 1e-6, "scale={}", s); // mean = 6/4 = 1.5
+        // 3/1.5 = 2.0 -> 1 ; 1/1.5 = 0.667 -> 1   (no tie here)
+        assert_eq!(q, vec![1, 1, 1, 1]);
+        // Direct tie: values at exactly 0.5 must round to 0 (even).
+        let w2 = [2.0f32, 1.0, 1.0, 0.0]; // mean = 4/4 = 1.0; 0.5 not present
+        let _ = w2;
+        // Construct an exact 0.5 tie: gamma=2, value=1 -> 1/2 = 0.5 -> 0
+        let w3 = [4.0f32, 1.0, 1.0, 2.0]; // mean = 8/4 = 2.0; 1/2 = 0.5 (tie) -> 0
+        let (q3, s3) = absmean_quantize(&w3);
+        assert!((s3 - 2.0).abs() < 1e-6, "scale={}", s3);
+        assert_eq!(q3, vec![1, 0, 0, 1]); // 4/2=2->1, 1/2=0.5->0(even), 2/2=1->1
     }
 
     #[test]
@@ -161,8 +182,8 @@ mod tests {
         let w = [2.0f32, -1.0, 0.0, 0.5];
         let (q, s) = absmax_quantize(&w);
         assert!((s - 2.0).abs() < 1e-6, "scale={}", s);
-        assert_eq!(q[0], 1);
-        assert_eq!(q[1], -1);
+        assert_eq!(q[0], 1); // 2/2 = 1
+        assert_eq!(q[1], 0); // -1/2 = -0.5 -> 0 (ties to even, matching torch)
         assert_eq!(q[2], 0);
     }
 
