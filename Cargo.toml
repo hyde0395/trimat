@@ -1,7 +1,14 @@
 [package]
-name    = "trimat"
-version = "0.1.0"
-edition = "2021"
+name        = "trimat"
+version     = "0.1.0"
+edition     = "2021"
+description  = "Ternary matrix multiplication — Rust+SIMD GEMV/GEMM for BitNet-family models"
+license     = "MIT"
+repository  = "https://github.com/hyde0395/trimat"
+homepage    = "https://github.com/hyde0395/trimat"
+readme      = "README.md"
+keywords    = ["bitnet", "ternary", "simd", "llm", "quantization"]
+categories  = ["science", "mathematics"]
 
 [lib]
 name       = "_trimat"

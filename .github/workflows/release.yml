@@ -1,0 +1,86 @@
+name: Release
+
+# Tag push (vX.Y.Z) publishes to PyPI. Manual run (workflow_dispatch) defaults
+# to TestPyPI for pre-release verification; choose `pypi` to publish manually.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Publish target"
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
+
+permissions:
+  contents: read
+
+jobs:
+  # Cross-platform wheels — same matrix as CI.yml (Apple Silicon, ARM Linux, x86).
+  wheels:
+    name: wheels (${{ matrix.platform.runner }} / ${{ matrix.platform.target }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            target: x86_64
+          - runner: ubuntu-latest
+            target: aarch64
+          - runner: macos-14
+            target: aarch64
+          - runner: macos-13
+            target: x86_64
+          - runner: windows-latest
+            target: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist
+          manylinux: auto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
+          path: dist
+
+  # Source distribution (sdist) — required for a complete PyPI release.
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  # Gather every wheel + sdist and publish via OIDC Trusted Publishing (no token).
+  publish:
+    name: publish (${{ (github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi') && 'TestPyPI' || 'PyPI' }})
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC; required by Trusted Publishing
+    steps:
+      - name: Collect distributions
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ (github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi') && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
