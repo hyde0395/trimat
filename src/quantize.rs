@@ -23,7 +23,9 @@ pub fn absmean_quantize(w: &[f32]) -> (Vec<i8>, f32) {
     if w.is_empty() {
         return (Vec::new(), 1.0);
     }
-    let mean_abs = w.iter().map(|v| v.abs()).sum::<f32>() / w.len() as f32;
+    // Accumulate in f64: a naive f32 sum over millions of weights drifts enough
+    // (~1.5%) to shift the scale and flip ternary codes at the 0.5 boundary.
+    let mean_abs = (w.iter().map(|v| v.abs() as f64).sum::<f64>() / w.len() as f64) as f32;
     if mean_abs == 0.0 {
         return (vec![0i8; w.len()], 1.0);
     }
@@ -168,6 +170,19 @@ mod tests {
         let (q3, s3) = absmean_quantize(&w3);
         assert!((s3 - 2.0).abs() < 1e-6, "scale={}", s3);
         assert_eq!(q3, vec![1, 0, 0, 1]); // 4/2=2->1, 1/2=0.5->0(even), 2/2=1->1
+    }
+
+    #[test]
+    fn test_absmean_scale_precise_on_large_input() {
+        // f32 naive summation drifts on large inputs (real BitNet weights are
+        // millions of values), shrinking mean|W| and flipping ternary codes at
+        // the 0.5 boundary. The scale must match the f64-accurate mean.
+        let n = 1_000_000usize;
+        let w: Vec<f32> = (0..n).map(|i| 1.2 + (i % 13) as f32 * 0.03).collect();
+        let (_q, s) = absmean_quantize(&w);
+        let exact = (w.iter().map(|v| v.abs() as f64).sum::<f64>() / n as f64) as f32;
+        let rel = (s - exact).abs() / exact;
+        assert!(rel < 1e-4, "scale {} vs exact {} (rel {})", s, exact, rel);
     }
 
     #[test]

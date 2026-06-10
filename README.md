@@ -106,13 +106,13 @@ faster than NumPy** at the model's real dimensions. Reproduce with
 `bitnet-b1.58-2B-4T` for trimat `BitLinear` (absmean weights + int8 activations)
 generates coherent text on CPU:
 
-> `The capital of France is` → `Paris, which is also the largest city in the country. Paris is known for…`  (6.8 tok/s, M4 CPU)
+> `The capital of France is` → `Paris. Paris is a city in the north of France…`  (6.7 tok/s, M4 CPU)
 
-Perplexity on a fixed passage is **10.0 vs 7.9** for the original model
-(**+28%**). The gap comes mostly from trimat's per-tensor int8 activation
-quantization vs BitNet's per-token scheme — an open improvement target, not a
-correctness bug (greedy output stays coherent). Reproduce with
-`scripts/generate_demo.py`.
+Perplexity on a fixed passage is **7.86 vs 7.86** for the original model
+(**+0.1%**) — trimat reproduces BitNet almost exactly (per-layer output cosine
+**0.99997**, ternary codes bit-identical). Reproduce with
+`scripts/generate_demo.py`; localize per-layer agreement with
+`scripts/diagnose_bug.py`.
 
 ## Benchmarks
 
