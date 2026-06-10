@@ -14,8 +14,12 @@ class TernaryTensor:
     def cols(self) -> int: ...
     def __repr__(self) -> str: ...
 
-def pack_tensor(w: NDArray[np.float32]) -> TernaryTensor:
-    """Quantize an FP32 ``(M, K)`` matrix with absmax and pack into bitplanes."""
+def pack_tensor(w: NDArray[np.float32], mode: str = "absmax") -> TernaryTensor:
+    """Quantize an FP32 ``(M, K)`` matrix to ternary and pack into bitplanes.
+
+    ``mode`` is ``"absmax"`` (gamma = max|W|, default) or ``"absmean"``
+    (gamma = mean|W|, the BitNet b1.58 weight formula). Use ``"absmean"`` for
+    real BitNet checkpoints, whose outliers collapse absmax to ~0."""
     ...
 
 def gemv(w: TernaryTensor, x: NDArray[np.float32]) -> NDArray[np.float32]:

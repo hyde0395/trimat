@@ -14,6 +14,27 @@ pub fn absmax_quantize(w: &[f32]) -> (Vec<i8>, f32) {
     (quantized, scale)
 }
 
+/// Quantize a FP32 slice to ternary {-1, 0, +1} using absmean scaling — the
+/// BitNet b1.58 weight formula. Returns (quantized, scale) where
+/// scale = mean(|w|). Unlike absmax, a single large outlier does not collapse
+/// the rest of the matrix to zero, so real BitNet checkpoints are preserved.
+/// Reconstruction: w ≈ quantized * scale. An all-zero input yields scale 1.0.
+pub fn absmean_quantize(w: &[f32]) -> (Vec<i8>, f32) {
+    if w.is_empty() {
+        return (Vec::new(), 1.0);
+    }
+    let mean_abs = w.iter().map(|v| v.abs()).sum::<f32>() / w.len() as f32;
+    if mean_abs == 0.0 {
+        return (vec![0i8; w.len()], 1.0);
+    }
+    let scale = mean_abs;
+    let quantized = w
+        .iter()
+        .map(|v| (v / scale).round().clamp(-1.0, 1.0) as i8)
+        .collect();
+    (quantized, scale)
+}
+
 /// Quantize FP32 activations to symmetric int8 using per-tensor absmax scaling
 /// (BitNet-style). Returns (q, scale) with q[k] = round(x[k] / scale) clamped to
 /// [-127, 127] and scale = max(|x|) / 127. Reconstruction: x ≈ q * scale.
@@ -113,6 +134,25 @@ mod tests {
     fn test_all_zero() {
         let (q, s) = absmax_quantize(&[0.0, 0.0, 0.0]);
         assert_eq!(q, vec![0, 0, 0]);
+        assert_eq!(s, 1.0);
+    }
+
+    #[test]
+    fn test_absmean_keeps_nonzeros_under_outlier() {
+        // One large outlier collapses absmax (everything else rounds to 0);
+        // absmean (BitNet b1.58 formula, gamma = mean|W|) preserves the signal.
+        let w = [10.0f32, 2.0, 2.0, 2.0];
+        let (q, s) = absmean_quantize(&w);
+        assert!((s - 4.0).abs() < 1e-6, "scale={}", s); // mean(|W|) = 16/4
+        assert_eq!(q, vec![1, 1, 1, 1]);
+        let (qmax, _) = absmax_quantize(&w);
+        assert_eq!(qmax, vec![1, 0, 0, 0]); // absmax: 2/10 -> 0
+    }
+
+    #[test]
+    fn test_absmean_all_zero() {
+        let (q, s) = absmean_quantize(&[0.0, 0.0]);
+        assert_eq!(q, vec![0, 0]);
         assert_eq!(s, 1.0);
     }
 

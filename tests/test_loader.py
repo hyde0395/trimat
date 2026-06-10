@@ -51,6 +51,26 @@ def test_should_pack_filter(tmp_path):
     assert isinstance(loaded["skip.weight"], np.ndarray)
 
 
+def test_pack_weights_absmean_preserves_outlier_signal():
+    # A large outlier collapses absmax (small values round to 0); absmean keeps
+    # the whole row. This is the BitNet b1.58 weight path.
+    w = np.array([[10.0, 2.0, 2.0, 2.0]], dtype=np.float32)
+    out_max = pack_weights({"w": w}, mode="absmax")["w"]
+    out_mean = pack_weights({"w": w}, mode="absmean")["w"]
+    x = np.ones(4, dtype=np.float32)
+    # absmax: codes=[1,0,0,0], scale=10 -> 10 ; absmean: codes=[1,1,1,1], scale=4 -> 16
+    np.testing.assert_allclose(trimat.gemv(out_max, x)[0], 10.0, atol=1e-4)
+    np.testing.assert_allclose(trimat.gemv(out_mean, x)[0], 16.0, atol=1e-4)
+
+
+def test_load_safetensors_absmean(tmp_path):
+    w = np.array([[10.0, 2.0, 2.0, 2.0]], dtype=np.float32)
+    path = _write(tmp_path, {"layer.weight": w})
+    loaded = load_safetensors(str(path), mode="absmean")
+    x = np.ones(4, dtype=np.float32)
+    np.testing.assert_allclose(trimat.gemv(loaded["layer.weight"], x)[0], 16.0, atol=1e-4)
+
+
 def test_load_missing_file_raises_loader_error(tmp_path):
     with pytest.raises(LoaderError):
         load_safetensors(str(tmp_path / "does-not-exist.safetensors"))

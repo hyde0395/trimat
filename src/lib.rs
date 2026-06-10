@@ -19,9 +19,17 @@ pub mod tensor;
 
 use tensor::TernaryTensor;
 
-/// Quantize an FP32 numpy matrix (M×K) with absmax and pack into bitplanes.
+/// Quantize an FP32 numpy matrix (M×K) to ternary and pack into bitplanes.
+///
+/// `mode` selects the per-tensor scale: "absmax" (gamma = max|W|, default) or
+/// "absmean" (gamma = mean|W|, the BitNet b1.58 weight formula). Real BitNet
+/// checkpoints have large outliers that collapse absmax to ~0, so use "absmean"
+/// for them.
 #[pyfunction]
-fn pack_tensor(_py: Python<'_>, w: PyReadonlyArray2<'_, f32>) -> PyResult<TernaryTensor> {
+#[pyo3(signature = (w, mode = "absmax"))]
+fn pack_tensor(
+    _py: Python<'_>, w: PyReadonlyArray2<'_, f32>, mode: &str,
+) -> PyResult<TernaryTensor> {
     let shape = w.shape();
     let (rows, cols) = (shape[0], shape[1]);
     if rows == 0 || cols == 0 {
@@ -32,8 +40,14 @@ fn pack_tensor(_py: Python<'_>, w: PyReadonlyArray2<'_, f32>) -> PyResult<Ternar
     } else {
         w.to_owned_array().into_raw_vec_and_offset().0
     };
-    let (quantized, scale) = quantize::absmax_quantize(&data);
-    let (nonzero, sign)    = pack::encode(&quantized);
+    let (quantized, scale) = match mode {
+        "absmax"  => quantize::absmax_quantize(&data),
+        "absmean" => quantize::absmean_quantize(&data),
+        _ => return Err(PyValueError::new_err(
+            "mode must be 'absmax' or 'absmean'",
+        )),
+    };
+    let (nonzero, sign) = pack::encode(&quantized);
     Ok(TernaryTensor::new(rows, cols, nonzero, sign, vec![scale]))
 }
 

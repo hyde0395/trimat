@@ -117,6 +117,16 @@ def test_quantized_batch_approximates_reference():
     assert np.all(np.abs(y - expected) <= tol + 1e-4)
 
 
+def test_bitlinear_absmean_mode():
+    # absmean keeps the small values that absmax would zero out under an outlier.
+    w = np.array([[10.0, 2.0, 2.0, 2.0]], dtype=np.float32)
+    x = torch.ones(4)
+    layer_max = BitLinear(w, mode="absmax")
+    layer_mean = BitLinear(w, mode="absmean")
+    np.testing.assert_allclose(layer_max(x).numpy()[0], 10.0, atol=1e-4)
+    np.testing.assert_allclose(layer_mean(x).numpy()[0], 16.0, atol=1e-4)
+
+
 def test_quantized_from_linear_roundtrips_shape():
     linear = torch.nn.Linear(32, 16)
     with torch.no_grad():

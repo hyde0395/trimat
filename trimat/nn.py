@@ -48,7 +48,9 @@ class BitLinear(_Base):  # type: ignore[misc, valid-type]
         bias: optional ``(out_features,)`` bias (array or tensor).
     """
 
-    def __init__(self, weight, bias=None, *, quantized: bool = False) -> None:
+    def __init__(
+        self, weight, bias=None, *, quantized: bool = False, mode: str = "absmax"
+    ) -> None:
         if not _HAS_TORCH:
             raise ImportError(
                 "BitLinear requires PyTorch; install it with `pip install torch`"
@@ -61,7 +63,9 @@ class BitLinear(_Base):  # type: ignore[misc, valid-type]
             w = np.ascontiguousarray(_to_numpy(weight), dtype=np.float32)
             if w.ndim != 2:
                 raise ValueError(f"weight must be 2D (out, in); got shape {w.shape}")
-            self._packed = trimat.pack(w)
+            # mode "absmean" is the BitNet b1.58 weight formula (use it for real
+            # BitNet checkpoints); "absmax" is the default.
+            self._packed = trimat.pack(w, mode)
 
         self.out_features = self._packed.rows
         self.in_features = self._packed.cols
@@ -81,11 +85,16 @@ class BitLinear(_Base):  # type: ignore[misc, valid-type]
             self._bias = b
 
     @classmethod
-    def from_linear(cls, linear, *, quantized: bool = False) -> "BitLinear":
-        """Quantize and pack an existing ``torch.nn.Linear`` layer."""
+    def from_linear(
+        cls, linear, *, quantized: bool = False, mode: str = "absmax"
+    ) -> "BitLinear":
+        """Quantize and pack an existing ``torch.nn.Linear`` layer.
+
+        Use ``mode="absmean"`` for BitNet b1.58 layers.
+        """
         weight = linear.weight.detach()
         bias = None if linear.bias is None else linear.bias.detach()
-        return cls(weight, bias, quantized=quantized)
+        return cls(weight, bias, quantized=quantized, mode=mode)
 
     @classmethod
     def from_packed(
